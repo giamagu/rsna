@@ -1,76 +1,105 @@
 import os
-import cv2
-import numpy as np
-import pydicom
+import SimpleITK as sitk
+import glob
 from tqdm import tqdm
+import numpy as np
 
-# =========================
-# CONFIG
-# =========================
-BASE_PATH = "rsna-intracranial-aneurysm-detection"
-SERIES_DIR = os.path.join(BASE_PATH, "series")
-OUTPUT_IMG_DIR = "preprocessed/images"
-IMG_SIZE = 224
+# ===== 0. Configurazioni =====
+base_dir = "rsna-intracranial-aneurysm-detection"
+output_base = "output"
 
-os.makedirs(OUTPUT_IMG_DIR, exist_ok=True)
+# Cartelle di destinazione
+os.makedirs(os.path.join(output_base, "series"), exist_ok=True)
+os.makedirs(os.path.join(output_base, "segmentations"), exist_ok=True)
+os.makedirs(os.path.join(output_base, "segmentations_cowseg"), exist_ok=True)
 
-# =========================
-# Funzione utilità
-# =========================
-def normalize_to_uint8(img: np.ndarray) -> np.ndarray:
-    """Normalizza immagine in [0, 255] e converte a uint8."""
-    img = img.astype(np.float32)
-    img = img - img.min()
-    if img.max() > 0:
-        img = img / img.max()
-    return (img * 255).astype(np.uint8)
+# Lista delle serie DICOM
+series_dirs = glob.glob(os.path.join(base_dir, "series/*"))
 
-# =========================
-# Processing
-# =========================
-series_list = sorted(os.listdir(SERIES_DIR))
-print(f"Totale series: {len(series_list)}")
+# ===== 1. Funzioni utili =====
+def resample_image(img, target_size=(224, 224)):
+    """
+    Resample image in XY a target_size, keeping Z
+    Linear interpolation for images
+    """
+    original_size = img.GetSize()
+    original_spacing = img.GetSpacing()
 
-for series_uid in tqdm(series_list):
-    series_path = os.path.join(SERIES_DIR, series_uid)
-    if not os.path.isdir(series_path):
-        continue
+    # Nuovo spacing XY per raggiungere target_size
+    new_spacing = [
+        original_spacing[0] * (original_size[0] / target_size[0]),
+        original_spacing[1] * (original_size[1] / target_size[1]),
+        original_spacing[2]  # mantieni Z
+    ]
 
-    out_series_dir = os.path.join(OUTPUT_IMG_DIR, series_uid)
-    os.makedirs(out_series_dir, exist_ok=True)
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetSize([target_size[0], target_size[1], original_size[2]])
+    resampler.SetOutputSpacing(new_spacing)
+    resampler.SetOutputOrigin(img.GetOrigin())
+    resampler.SetOutputDirection(img.GetDirection())
+    resampler.SetInterpolator(sitk.sitkLinear)  # linear per immagini
+    return resampler.Execute(img)
 
-    dicom_files = sorted(os.listdir(series_path))
-    for dcm_file in dicom_files:
-        dcm_path = os.path.join(series_path, dcm_file)
+def resample_mask(mask_img, reference_img):
+    """
+    Resample mask using nearest neighbor to match reference_img
+    """
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetReferenceImage(reference_img)
+    resampler.SetInterpolator(sitk.sitkNearestNeighbor)
+    return resampler.Execute(mask_img)
 
-        try:
-            dcm = pydicom.dcmread(dcm_path)
-            img = dcm.pixel_array
-        except Exception as e:
-            print(f"Errore con {dcm_path}: {e}")
-            continue
+def convert_to_float32(img):
+    """
+    Converte Safe SimpleITK.Image in float32 usando numpy
+    """
+    arr = sitk.GetArrayFromImage(img).astype(np.float32)
+    img_float = sitk.GetImageFromArray(arr)
+    img_float.SetSpacing(img.GetSpacing())
+    img_float.SetOrigin(img.GetOrigin())
+    img_float.SetDirection(img.GetDirection())
+    return img_float
 
-        # Caso 2D
-        if img.ndim == 2:
-            out_path = os.path.join(out_series_dir, dcm_file.replace(".dcm", ".png"))
-            if os.path.isfile(out_path):
-                continue  # Salta se già esiste
-            img = normalize_to_uint8(img)
-            img_resized = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
-            cv2.imwrite(out_path, img_resized)
+# ===== 2. Loop sulle serie =====
+for series_path in series_dirs:
+    series_id = os.path.basename(series_path)
+    print(f"Processing series: {series_id}")
 
-        # Caso 3D (più slice in un DICOM)
-        elif img.ndim == 3:
-            num_slices = img.shape[0]
-            for i in range(num_slices):
-                out_path = os.path.join(out_series_dir, f"{dcm_file.replace('.dcm','')}_slice{i:03d}.png")
-                if os.path.isfile(out_path):
-                    continue  # Salta se già esiste
-                slice_img = normalize_to_uint8(img[i])
-                slice_resized = cv2.resize(slice_img, (IMG_SIZE, IMG_SIZE))
-                cv2.imwrite(out_path, slice_resized)
+    # ----- Leggi i DICOM -----
+    reader = sitk.ImageSeriesReader()
+    dicom_files = reader.GetGDCMSeriesFileNames(series_path)
+    reader.SetFileNames(dicom_files)
+    image = reader.Execute()
 
-        else:
-            print(f"Shape inattesa {img.shape} in {dcm_path}")
-            continue
+    # ----- Converti in float32 in modo sicuro -----
+    #image = convert_to_float32(image)
 
+    # ----- Controlla segmentazioni -----
+    seg_path = os.path.join(base_dir, "segmentations", f"{series_id}.nii")
+    seg_cow_path = os.path.join(base_dir, "segmentations", f"{series_id}_cowseg.nii")
+
+    seg = sitk.ReadImage(seg_path) if os.path.exists(seg_path) else None
+    seg_cow = sitk.ReadImage(seg_cow_path) if os.path.exists(seg_cow_path) else None
+
+    # ----- Resample immagine -----
+    if image.GetDimension() == 4:
+        size = list(image.GetSize())
+        size[3] = 0  # tieni solo un frame
+        index = [0, 0, 0, 0]
+        image = sitk.Extract(image, size, index)
+        image = convert_to_float32(image)
+    image_resampled = resample_image(image)
+    sitk.WriteImage(image_resampled, os.path.join(output_base, "series", f"{series_id}.nii"))
+
+    # ----- Resample mask -----
+    if seg:
+        seg_resampled = resample_mask(seg, image_resampled)
+        sitk.WriteImage(seg_resampled, os.path.join(output_base, "segmentations", f"{series_id}.nii"))
+
+    if seg_cow:
+        seg_cow_resampled = resample_mask(seg_cow, image_resampled)
+        sitk.WriteImage(seg_cow_resampled, os.path.join(output_base, "segmentations_cowseg", f"{series_id}_cowseg.nii"))
+
+    print(f"Series {series_id} processed.\n")
+
+print("All series processed!")
