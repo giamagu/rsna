@@ -35,7 +35,7 @@ def plot_three_images(series_dir, seg_dir, seg_cowseg_dir, uid, i):
     plt.show()
 
 # ===== 0. Configurazioni =====
-base_dir = "rsna-intracranial-aneurysm-detection"
+base_dir = "/kaggle/input/rsna-intracranial-aneurysm-detection"
 output_base = "output"
 
 seg_dir = os.path.join(output_base, "segmentations")
@@ -231,4 +231,46 @@ pd.DataFrame(new_records).to_csv(out_csv, index=False)
 print("Saved new localizers to:", out_csv)
 
 
+    for _, row in df_series.iterrows():
+        coords = ast.literal_eval(row["coordinates"])
+        x_old, y_old = coords["x"], coords["y"]
+        sop_uid = row["SOPInstanceUID"]
+    
+        # scala XY alle nuove dimensioni
+        new_x = x_old * (224 / original_size[0])
+        new_y = y_old * (224 / original_size[1])
+    
+        f_old = coords.get("f", None)
+        if f_old is not None:
+            # caso normale: f specificato
+            key = (sop_uid, int(f_old))
+            if key in sop_uid_to_index:
+                f_global = sop_uid_to_index[key]
+            else:
+                print(f"[WARNING] Slice f={f_old} per SOP={sop_uid} non trovata in {series_id}, uso centro volume")
+                f_global = new_size[2] // 2
+        else:
+            # caso senza f: DICOM deve avere 1 sola slice
+            # cerco se esistono entry multiple per lo stesso sop_uid
+            matching_keys = [k for k in sop_uid_to_index.keys() if k[0] == sop_uid]
+            if len(matching_keys) == 1:
+                f_global = sop_uid_to_index[matching_keys[0]]
+            else:
+                print(f"[ERROR] SOP={sop_uid} in serie {series_id} ha {len(matching_keys)} slice ma manca f!")
+                continue  # salta questo record
+    
+        new_coords = {"x": float(new_x), "y": float(new_y), "f": int(f_global)}
+    
+        new_records.append({
+            "SeriesInstanceUID": row["SeriesInstanceUID"],
+            "coordinates": str(new_coords),
+            "location": row["location"]
+        })
+
+
 print("All series processed!")
+
+# ===== 4. Salva nuovo CSV =====
+out_csv = os.path.join(output_base, "train_localizers_resampled.csv")
+pd.DataFrame(new_records).to_csv(out_csv, index=False)
+print("Saved new localizers to:", out_csv)
