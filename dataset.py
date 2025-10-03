@@ -1,105 +1,83 @@
 import os
 import numpy as np
-import pandas as pd
-from PIL import Image
-import ast
+import torch
+from torch.utils.data import Dataset
 
-class AneurysmDataset:
-    def __init__(self, img_dir, csv_path, n=1):
-        self.img_dir = img_dir
-        self.csv_path = csv_path
-        self.n = n  # Numero di immagini vicine da includere nelle label
-        self.LABEL_COLUMNS = [
-            "Anterior_communicating_artery",
-            "Left_middle_cerebral_artery",
-            "Right_middle_cerebral_artery",
-            "Left_posterior_communicating_artery",
-            "Right_posterior_communicating_artery",
-            "Left_posterior_cerebral_artery",
-            "Right_posterior_cerebral_artery",
-            "Basilar_artery",
-            "Left_internal_carotid_artery",
-            "Right_internal_carotid_artery",
-            "Vertebral_artery",
-            "Cerebellar_artery",
-            "Other"
-        ]
-        self.num_labels = len(self.LABEL_COLUMNS) + 1  # 13 + 1 per "almeno un aneurisma"
-        self.localizers = self._load_localizers()
+class RSNA3DDataset(Dataset):
+    def __init__(self, root_dir, series_ids, transform=None):
+        """
+        Args:
+            root_dir (str): directory principale del dataset resampled_dataset
+                deve contenere:
+                - series/
+                - aneurysm_labels/
+                - segmentations_cowseg/
+            transform: trasformazioni opzionali (es. augmentazioni, normalizzazioni)
+        """
+        self.root_dir = root_dir
+        self.series_dir = os.path.join(root_dir, "series")
+        self.aneurysm_dir = os.path.join(root_dir, "aneurysm_labels")
+        self.vessels_dir = os.path.join(root_dir, "segmentations_cowseg")
+        self.transform = transform
+        self.series_ids = series_ids
 
-    def _load_localizers(self):
-        """Carica il file train_localizers.csv e crea un dizionario con le informazioni sugli aneurismi."""
-        df = pd.read_csv(self.csv_path)
-        localizers = {}
+        # Lista delle cartelle → assumiamo che abbiano lo stesso nome
+        self.ids = []
+        for dir in os.listdir(self.series_dir):
+            if dir in self.series_ids:
+                self.ids.append(dir)
+        self.ids.sort()
 
-        for _, row in df.iterrows():
-            sop_uid = row["SOPInstanceUID"]
-            coordinates = ast.literal_eval(row["coordinates"])
-            location = row["location"]
+    def __len__(self):
+        return len(self.ids)
 
-            # Trova l'indice della vena corrispondente
-            if location in self.LABEL_COLUMNS:
-                label_idx = self.LABEL_COLUMNS.index(location)
-            else:
-                continue
+    def __getitem__(self, idx):
+        series_id = self.ids[idx]
 
-            # Aggiungi al dizionario
-            if sop_uid not in localizers:
-                localizers[sop_uid] = {"labels": np.zeros(len(self.LABEL_COLUMNS)), "slices": []}
-            localizers[sop_uid]["labels"][label_idx] = 1
-            if "f" in row:  # Se c'è un'informazione sulla slice
-                localizers[sop_uid]["slices"].append(int(row["f"]))
+        # Path ai file npy (ogni cartella contiene un solo npy)
+        series_path = os.path.join(self.series_dir, series_id)
+        aneurysm_path = os.path.join(self.aneurysm_dir, series_id)
+        vessels_path = os.path.join(self.vessels_dir, series_id)
 
-        return localizers
+        # Ogni cartella contiene un solo npy → lo prendiamo
+        series_file = [f for f in os.listdir(series_path) if f.endswith(".npy")][0]
+        aneurysm_file = [f for f in os.listdir(aneurysm_path) if f.endswith(".npy")][0]
+        vessels_file = [f for f in os.listdir(vessels_path) if f.endswith(".npy")][0]
 
-    # Modifica della funzione build_dataset
-    def build_dataset(self):
-        dataset = []
+        # Carica i volumi
+        x = np.load(os.path.join(series_path, series_file))        # input
+        y_aneurysm = np.load(os.path.join(aneurysm_path, aneurysm_file))  # mask aneurismi
+        y_vessels = np.load(os.path.join(vessels_path, vessels_file))     # mask vasi
 
-        for series_uid in os.listdir(self.img_dir):
-            series_path = os.path.join(self.img_dir, series_uid)
-            if not os.path.isdir(series_path):
-                continue
+        # Crea vettore 14-D da aneurysm label
+        # posizione 0 = generico (1 se c’è almeno un aneurisma in qualunque vaso)
+        # posizione 1..13 = 1 se c’è almeno un pixel con valore == i
+        label_vec = np.zeros(14, dtype=np.float32)
+        unique_vals = np.unique(y_aneurysm)
 
-            img_files = sorted([f for f in os.listdir(series_path) if f.endswith(".png")])
+        # 1..13
+        for i in range(1, 14):
+            if i in unique_vals:
+                label_vec[i] = 1.0
+        # 0 = generico
+        if np.any(label_vec[1:]):
+            label_vec[0] = 1.0
 
-            for i, img_file in enumerate(img_files):
-                sop_uid = img_file.split(".")[0]  # Sop UID è il nome del file senza estensione
-                img_path = os.path.join(series_path, img_file)
+        # Cast a torch tensor
+        x = torch.from_numpy(x).unsqueeze(0).float()           # (1, D, H, W)
+        y_aneurysm = torch.from_numpy(y_aneurysm).long()       # (D, H, W)
+        y_vessels = torch.from_numpy(y_vessels).long()         # (D, H, W)
+        label_vec = torch.from_numpy(label_vec).float()        # (14,)
 
-                # Carica l'immagine
-                img = Image.open(img_path)
+        sample = {
+            "id": series_id,
+            "image": x,
+            "vessels": y_vessels,
+            "aneurysms": y_aneurysm,
+            "aneurysm_vector": label_vec
+        }
 
-                # Inizializza la label
-                label = np.zeros(self.num_labels)
+        if self.transform:
+            sample = self.transform(sample)
 
-                # Inizializza la maschera
-                mask = np.zeros((224, 224), dtype=np.uint8)
-
-                # Se l'immagine è in localizers, aggiorna la label e la maschera
-                if sop_uid in self.localizers:
-                    aneurysm_info = self.localizers[sop_uid]
-                    label[:len(self.LABEL_COLUMNS)] = aneurysm_info["labels"]
-
-                    # Genera la maschera per le coordinate dell'aneurisma
-                    for coord in aneurysm_info.get("coordinates", []):
-                        x, y = int(coord['x']), int(coord['y'])
-                        if 0 <= x < 224 and 0 <= y < 224:  # Assicurati che le coordinate siano valide
-                            mask[y, x] = 1
-
-                    # Estendi la label alle immagini vicine
-                    for slice_offset in range(-self.n, self.n + 1):
-                        neighbor_idx = i + slice_offset
-                        if 0 <= neighbor_idx < len(img_files):
-                            neighbor_file = img_files[neighbor_idx]
-                            neighbor_uid = neighbor_file.split(".")[0]
-                            if neighbor_uid in self.localizers:
-                                label[:len(self.LABEL_COLUMNS)] |= self.localizers[neighbor_uid]["labels"]
-
-                # Calcola la 14esima entrata (almeno un aneurisma)
-                label[-1] = int(label[:len(self.LABEL_COLUMNS)].sum() > 0)
-
-                # Aggiungi al dataset l'immagine, la label e la maschera
-                dataset.append((img, label, mask))
-
-        return dataset
+        return sample

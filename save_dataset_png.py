@@ -7,54 +7,36 @@ import imageio
 import pandas as pd
 import ast
 
-
-# ===== 5. Funzione per plottare le tre immagini =====
-import matplotlib.pyplot as plt
-
-def plot_three_images(series_dir, seg_dir, seg_cowseg_dir, uid, i):
-    """
-    Plotta le tre immagini (serie, segmentazione, cowseg) per un dato uid e indice i.
-    """
-    img_paths = [
-        os.path.join(series_dir, uid, os.listdir(os.path.join(series_dir, uid))[i]),
-        os.path.join(seg_dir, uid, os.listdir(os.path.join(seg_dir, uid))[i]),
-        os.path.join(seg_cowseg_dir, uid, os.listdir(os.path.join(seg_cowseg_dir, uid))[i])
-    ]
-    titles = ["Serie", "Segmentazione", "Cowseg"]
-    imgs = [imageio.imread(p) for p in img_paths]
-    imgs[2]*=18
-    if np.max(imgs[2])<1:
-        return
-    plt.figure(figsize=(12,4))
-    for idx, (img, title) in enumerate(zip(imgs, titles)):
-        plt.subplot(1,3,idx+1)
-        plt.imshow(img, cmap='gray')
-        plt.title(title)
-        plt.axis('off')
-    plt.tight_layout()
-    plt.show()
-
 # ===== 0. Configurazioni =====
-base_dir = "/kaggle/input/rsna-intracranial-aneurysm-detection"
-output_base = "output"
-
-seg_dir = os.path.join(output_base, "segmentations")
-seg_cowseg_dir = os.path.join(output_base, "segmentations_cowseg")
-series_dir = os.path.join(output_base, "series")
-
-uid = os.listdir(seg_dir)[0]
-
-for i in range(500):
-    #continue
-    plot_three_images(series_dir, seg_dir, seg_cowseg_dir, uid, i)
+base_dir = "rsna-intracranial-aneurysm-detection"
+output_base = "resampled_dataset"
 
 # Cartelle di destinazione
 os.makedirs(os.path.join(output_base, "series"), exist_ok=True)
 os.makedirs(os.path.join(output_base, "segmentations"), exist_ok=True)
 os.makedirs(os.path.join(output_base, "segmentations_cowseg"), exist_ok=True)
+os.makedirs(os.path.join(output_base, "aneurysm_labels"), exist_ok=True)
 
 # Lista delle serie DICOM
 series_dirs = glob.glob(os.path.join(base_dir, "series/*"))
+
+ID_TO_LABEL = {
+    1:  "Other Posterior Circulation",
+    2:  "Basilar Tip",
+    3:  "Right Posterior Communicating Artery",
+    4:  "Left Posterior Communicating Artery",
+    5:  "Right Infraclinoid Internal Carotid Artery",
+    6:  "Left Infraclinoid Internal Carotid Artery",
+    7:  "Right Supraclinoid Internal Carotid Artery",
+    8:  "Left Supraclinoid Internal Carotid Artery",
+    9:  "Right Middle Cerebral Artery",
+    10: "Left Middle Cerebral Artery",
+    11: "Right Anterior Cerebral Artery",
+    12: "Left Anterior Cerebral Artery",
+    13: "Anterior Communicating Artery"
+}
+
+LABEL_TO_ID = {v: k for k, v in ID_TO_LABEL.items()}
 
 # ===== 1. Funzioni utili =====
 def resample_image(img, target_size=(224, 224)):
@@ -101,6 +83,16 @@ def save_slices(arr, out_dir, prefix):
         out_path = os.path.join(out_dir, f"{prefix}_slice_{i}.png")
         imageio.imwrite(out_path, arr[i])
 
+def save_volume(arr, out_dir, prefix):
+    os.makedirs(out_dir, exist_ok=True)
+    
+    # Assicuriamoci che sia uint8
+    arr_uint8 = arr.astype(np.uint8)
+    
+    out_path = os.path.join(out_dir, f"{prefix}.npy")
+    np.save(out_path, arr_uint8)
+    print(f"Salvato: {out_path} con shape {arr_uint8.shape} e dtype {arr_uint8.dtype}")
+
 def sitk_to_uint8(img, is_mask=False):
     arr = sitk.GetArrayFromImage(img) # Z,H,W
     if is_mask:
@@ -117,19 +109,10 @@ localizers = pd.read_csv(localizers_path)
 new_records = []
 
 # ===== 3. Loop sulle serie =====
-for series_path in series_dirs[:40]:
+for series_path in series_dirs[:500]:
     series_id = os.path.basename(series_path)
     print(f"Processing series: {series_id}")
 
-    # ----- Controlla segmentazioni -----
-    seg_path = os.path.join(base_dir, "segmentations", f"{series_id}.nii")
-    seg_cow_path = os.path.join(base_dir, "segmentations", f"{series_id}_cowseg.nii")
-
-    seg = sitk.ReadImage(seg_path) if os.path.exists(seg_path) else None
-    seg_cow = sitk.ReadImage(seg_cow_path) if os.path.exists(seg_cow_path) else None
-
-    if not seg:
-        continue
 
     # ----- Leggi i DICOM -----
     reader = sitk.ImageSeriesReader()
@@ -152,17 +135,24 @@ for series_path in series_dirs[:40]:
 
     # ----- Salvataggio immagine come PNG -----
     arr_img = sitk_to_uint8(image_resampled, is_mask=False)
-    save_slices(arr_img, os.path.join(output_base, "series", series_id), series_id)
+    save_volume(arr_img, os.path.join(output_base, "series", series_id), series_id)
 
-    if seg:
+    # ----- Controlla segmentazioni -----
+    seg_path = os.path.join(base_dir, "segmentations", f"{series_id}.nii")
+    seg_cow_path = os.path.join(base_dir, "segmentations", f"{series_id}_cowseg.nii")
+
+    seg = sitk.ReadImage(seg_path) if os.path.exists(seg_path) else None
+    seg_cow = sitk.ReadImage(seg_cow_path) if os.path.exists(seg_cow_path) else None
+
+    '''if seg:
         seg_resampled = resample_mask(seg, image_resampled)
         arr_seg = sitk_to_uint8(seg_resampled, is_mask=False)
-        save_slices(arr_seg, os.path.join(output_base, "segmentations", series_id), series_id)
+        save_volume(arr_seg, os.path.join(output_base, "segmentations", series_id), series_id)'''
 
     if seg_cow:
         seg_cow_resampled = resample_mask(seg_cow, image_resampled)
         arr_seg_cow = sitk_to_uint8(seg_cow_resampled, is_mask=True)
-        save_slices(arr_seg_cow, os.path.join(output_base, "segmentations_cowseg", series_id), series_id)
+        save_volume(arr_seg_cow, os.path.join(output_base, "segmentations_cowseg", series_id), series_id)
 
     # ----- Aggiorna localizers per questa serie -----
     df_series = localizers[localizers["SeriesInstanceUID"] == series_id]
@@ -176,18 +166,17 @@ for series_path in series_dirs[:40]:
     
     for f in dicom_list:
         img = sitk.ReadImage(f)
-        if img.HasMetaDataKey("0008|0018"):
-            sop_uid = img.GetMetaData("0008|0018")
-    
-            # quante slice ha questo file
-            size = img.GetSize()  # (X, Y, Z)
-            n_slices = size[2] if img.GetDimension() == 3 else 1
-    
-            # assegna un indice globale a tutte le slice di questo file
-            for z in range(n_slices):
-                sop_uid_to_index[(sop_uid, z)] = offset + z
-    
-            offset += n_slices  # aggiorna il contatore
+        sop_uid = img.GetMetaData("0008|0018")
+
+        # quante slice ha questo file
+        size = img.GetSize()  # (X, Y, Z)
+        n_slices = size[2] if img.GetDimension() == 3 else 1
+
+        # assegna un indice globale a tutte le slice di questo file
+        for z in range(n_slices):
+            sop_uid_to_index[(sop_uid, z)] = offset + z
+
+        offset += n_slices  # aggiorna il contatore
 
     for _, row in df_series.iterrows():
         coords = ast.literal_eval(row["coordinates"])
@@ -202,64 +191,32 @@ for series_path in series_dirs[:40]:
         if f_old is not None:
             # caso normale: f specificato
             key = (sop_uid, int(f_old))
+            print(key)
             if key in sop_uid_to_index:
                 f_global = sop_uid_to_index[key]
             else:
                 print(f"[WARNING] Slice f={f_old} per SOP={sop_uid} non trovata in {series_id}, uso centro volume")
-                f_global = new_size[2] // 2
+                a = []
+                b = a[1]
         else:
             # caso senza f: DICOM deve avere 1 sola slice
             # cerco se esistono entry multiple per lo stesso sop_uid
             matching_keys = [k for k in sop_uid_to_index.keys() if k[0] == sop_uid]
+            print(matching_keys)
             if len(matching_keys) == 1:
                 f_global = sop_uid_to_index[matching_keys[0]]
+                print(f_global)
             else:
                 print(f"[ERROR] SOP={sop_uid} in serie {series_id} ha {len(matching_keys)} slice ma manca f!")
                 continue  # salta questo record
     
         new_coords = {"x": float(new_x), "y": float(new_y), "f": int(f_global)}
-    
-        new_records.append({
-            "SeriesInstanceUID": row["SeriesInstanceUID"],
-            "coordinates": str(new_coords),
-            "location": row["location"]
-        })
+        array_label = np.zeros_like(arr_img, dtype=np.uint8)  # Z,H,W
+        new_y, new_x = int(new_y), int(new_x)
+        for i in range(2, 0, -1):
+            array_label[max(f_global - i, 0): f_global + i, max(new_y - i, 0): new_y + i, max(new_x - i, 0): new_x + i] = LABEL_TO_ID[row.location]
 
-# ===== 4. Salva nuovo CSV =====
-out_csv = os.path.join(output_base, "train_localizers_resampled.csv")
-pd.DataFrame(new_records).to_csv(out_csv, index=False)
-print("Saved new localizers to:", out_csv)
-
-
-    for _, row in df_series.iterrows():
-        coords = ast.literal_eval(row["coordinates"])
-        x_old, y_old = coords["x"], coords["y"]
-        sop_uid = row["SOPInstanceUID"]
-    
-        # scala XY alle nuove dimensioni
-        new_x = x_old * (224 / original_size[0])
-        new_y = y_old * (224 / original_size[1])
-    
-        f_old = coords.get("f", None)
-        if f_old is not None:
-            # caso normale: f specificato
-            key = (sop_uid, int(f_old))
-            if key in sop_uid_to_index:
-                f_global = sop_uid_to_index[key]
-            else:
-                print(f"[WARNING] Slice f={f_old} per SOP={sop_uid} non trovata in {series_id}, uso centro volume")
-                f_global = new_size[2] // 2
-        else:
-            # caso senza f: DICOM deve avere 1 sola slice
-            # cerco se esistono entry multiple per lo stesso sop_uid
-            matching_keys = [k for k in sop_uid_to_index.keys() if k[0] == sop_uid]
-            if len(matching_keys) == 1:
-                f_global = sop_uid_to_index[matching_keys[0]]
-            else:
-                print(f"[ERROR] SOP={sop_uid} in serie {series_id} ha {len(matching_keys)} slice ma manca f!")
-                continue  # salta questo record
-    
-        new_coords = {"x": float(new_x), "y": float(new_y), "f": int(f_global)}
+        save_volume(array_label, os.path.join(output_base, "aneurysm_labels", series_id), series_id)
     
         new_records.append({
             "SeriesInstanceUID": row["SeriesInstanceUID"],

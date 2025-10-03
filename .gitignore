@@ -1,3 +1,5 @@
 rsna-intracranial-aneurysm-detection
 preprocessed
 output
+resampled_dataset
+__pycache__
