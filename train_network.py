@@ -5,9 +5,36 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
+import numpy as np
 
 from dataset import RSNA3DDataset
-from model import MultiTask3DNet
+from model import UNet3D
+from sklearn.metrics import roc_auc_score
+import matplotlib.pyplot as plt
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+import cv2
+
+def evaluate_score(labels, preds):
+    # Converti labels e preds in array NumPy
+    labels_array = np.array(labels)  # Shape: (N, 14)
+    preds_array = np.array(preds)    # Shape: (N, 14)
+
+    # Calcola l'AUC per la prima componente (AUC_0)
+    auc_0 = roc_auc_score(labels_array[:, 0], preds_array[:, 0])
+
+    # Calcola l'AUC per le altre componenti (AUC_1, ..., AUC_13)
+    auc_rest = 0
+    meaningful_classes = 0
+    for i in range(1, 14):
+        auc_i = roc_auc_score(labels_array[:, i], preds_array[:, i])
+        if not np.isnan(auc_i):
+            meaningful_classes += 1
+            auc_rest += auc_i
+
+    # Calcola l'AUC totale
+    auc_total = auc_0 + (1 / meaningful_classes) * auc_rest
+    return auc_total / 2
 
 def main():
 
@@ -17,10 +44,10 @@ def main():
     DATASET_DIR = "resampled_dataset"
     SPLIT_FILE = os.path.join(DATASET_DIR, "split.json")
 
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    BATCH_SIZE = 2
-    EPOCHS = 50
-    LR = 1e-4
+    DEVICE = "cpu"#torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    BATCH_SIZE = 4
+    EPOCHS = 30
+    LR = 1e-3
 
     # ==============================
     # CREA O CARICA SPLIT
@@ -49,23 +76,60 @@ def main():
     # ==============================
     # DATALOADERS
     # ==============================
-    train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series)
+
+    image_size = 224
+    train_transforms = A.Compose(
+        [
+            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, border_mode=0, p=0.5),
+            A.ElasticTransform(alpha=1, sigma=10, p=0.5),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit = 0.2, p=0.5),
+        ],
+    additional_targets={
+        "vessels": "mask",  # Le segmentazioni dei vasi sono trattate come maschere
+        "aneurysms": "mask"  # Le segmentazioni degli aneurismi sono trattate come maschere
+    }
+)
+
+
+    train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series, transform=train_transforms)
     val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+    train_dataset[0]
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, drop_last =True)
     val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
     # ==============================
     # MODEL
     # ==============================
-    model = MultiTask3DNet(
-        in_channels=1,
-        num_vessel_classes=14,
-        num_aneurysm_classes=14,
-        num_classification_classes=14,
-        pretrained=True,
-        freeze_backbone=False
+    model = UNet3D(
     ).to(DEVICE)
+
+    '''ckpt_path = "checkpoint_epoch_30.pth"
+    model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
+    model.eval()
+
+    labels = []
+    preds = []
+
+    for i in range(len(train_dataset)):
+        sample = train_dataset[i]
+        leftover = sample["image"].shape[1]%16
+        left_over_left = int(leftover/2)
+        left_over_right = leftover - left_over_left
+        if leftover > 0:
+            out = model(sample["image"][:, left_over_left:-left_over_right, :, :].unsqueeze(0).to(DEVICE))
+        else:
+            out = model(sample["image"].unsqueeze(0).to(DEVICE))
+        labels.append(sample["aneurysm_vector"].tolist())
+        preds.append(torch.sigmoid(out["class"].to(DEVICE).cpu()).detach().numpy().tolist()[0])
+        a = 1
+
+    # Calculate AUC
+    auc_score = evaluate_score(labels, preds)
+    print(f"AUC Score: {auc_score:.4f}")'''
 
     # ==============================
     # LOSSES & OPTIMIZER
@@ -82,24 +146,33 @@ def main():
         model.train()
         total_loss = 0.0
 
+        i = 0
+
         for batch in train_loader:
-            inputs = batch["input"].to(DEVICE, dtype=torch.float32)
-            seg_vessels_gt = batch["cowseg"].to(DEVICE, dtype=torch.long)
-            seg_aneurysm_gt = batch["aneurysm_seg"].to(DEVICE, dtype=torch.long)
+            inputs = batch["image"].to(DEVICE, dtype=torch.float32)
+            seg_vessels_gt = batch["vessels"].to(DEVICE, dtype=torch.long)
+            seg_aneurysm_gt = batch["aneurysms"].to(DEVICE, dtype=torch.long)
             vec_gt = batch["aneurysm_vector"].to(DEVICE, dtype=torch.float32)
 
             optimizer.zero_grad()
             outputs = model(inputs)
 
-            loss_vessels = criterion_seg(outputs["seg_vessels"], seg_vessels_gt)
+            loss_vessels = torch.tensor(0.0, device=DEVICE)
+            for k in range(seg_vessels_gt.shape[0]):
+                if seg_vessels_gt[k].min().item() > -0.5:
+                    loss_vessels += criterion_seg(outputs["seg_vessels"][k:k+1], seg_vessels_gt[k:k+1])
             loss_aneurysm = criterion_seg(outputs["seg_aneurysms"], seg_aneurysm_gt)
-            loss_vec = criterion_vec(outputs["class"], vec_gt)
+            loss_vec = criterion_vec(outputs["class"], vec_gt) / 10
 
             loss = loss_vessels + loss_aneurysm + loss_vec
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
+
+            #print(f"Epoch {epoch+1}/{EPOCHS} | Batch {i+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
+
+            i += 1
 
         avg_train_loss = total_loss / len(train_loader)
 
@@ -108,18 +181,18 @@ def main():
         val_loss = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                inputs = batch["input"].to(DEVICE, dtype=torch.float32)
-                seg_vessels_gt = batch["cowseg"].to(DEVICE, dtype=torch.long)
-                seg_aneurysm_gt = batch["aneurysm_seg"].to(DEVICE, dtype=torch.long)
+                inputs = batch["image"].to(DEVICE, dtype=torch.float32)
+                seg_vessels_gt = batch["vessels"].to(DEVICE, dtype=torch.long)
+                seg_aneurysm_gt = batch["aneurysms"].to(DEVICE, dtype=torch.long)
                 vec_gt = batch["aneurysm_vector"].to(DEVICE, dtype=torch.float32)
 
                 outputs = model(inputs)
 
-                loss_vessels = criterion_seg(outputs["seg_vessels"], seg_vessels_gt)
+                #loss_vessels = criterion_seg(outputs["seg_vessels"], seg_vessels_gt)
                 loss_aneurysm = criterion_seg(outputs["seg_aneurysms"], seg_aneurysm_gt)
                 loss_vec = criterion_vec(outputs["class"], vec_gt)
 
-                loss = loss_vessels + loss_aneurysm + loss_vec
+                loss = loss_aneurysm + loss_vec
                 val_loss += loss.item()
 
         avg_val_loss = val_loss / len(val_loader)
@@ -131,6 +204,30 @@ def main():
             ckpt_path = f"checkpoint_epoch_{epoch+1}.pth"
             torch.save(model.state_dict(), ckpt_path)
             print(f"Checkpoint salvato: {ckpt_path}")
+
+    ckpt_path = "checkpoint_epoch_30.pth"
+    model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
+    model.eval()
+
+    labels = []
+    preds = []
+
+    for i in range(len(train_dataset)):
+        sample = train_dataset[i]
+        leftover = sample["image"].shape[1]%16
+        left_over_left = int(leftover/2)
+        left_over_right = leftover - left_over_left
+        if leftover > 0:
+            out = model(sample["image"][:, left_over_left:-left_over_right, :, :].unsqueeze(0).to(DEVICE))
+        else:
+            out = model(sample["image"].unsqueeze(0).to(DEVICE))
+        labels.append(sample["aneurysm_vector"].tolist())
+        preds.append(torch.sigmoid(out["class"].to(DEVICE).cpu()).detach().numpy().tolist()[0])
+        a = 1
+
+    # Calculate AUC
+    auc_score = evaluate_score(labels, preds)
+    print(f"AUC Score: {auc_score:.4f}")
 
 
 if __name__ == "__main__":

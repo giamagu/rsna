@@ -109,7 +109,7 @@ localizers = pd.read_csv(localizers_path)
 new_records = []
 
 # ===== 3. Loop sulle serie =====
-for series_path in series_dirs[:500]:
+for series_path in series_dirs:
     series_id = os.path.basename(series_path)
     print(f"Processing series: {series_id}")
 
