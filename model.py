@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
+import numpy as np
+import random
 
 # OPZIONALE: import di qualche backbone pre-addestrato 3D o “inflated” da 2D
 # Per esempio da segmentation_models_pytorch_3d
@@ -95,12 +97,12 @@ class UNet3D(nn.Module):
         out2 = self.head2(x)  # [B,14,D,H,W]
 
         # global classification: max pooling sui voxel
+        pred = out1.clone()
+        pred[:,0,:,:,:] = -pred[:,0,:,:,:]
         pooled = self.global_pool(out1).view(out1.size(0), -1)  # [B,14]
 
         # Copia i valori 1-13, metti somma in 0
-        vec = torch.zeros_like(pooled)
-        vec[:, 1:] = pooled[:, 1:]          # 1-13
-        vec[:, 0] = torch.clamp(pooled[:, 1:].sum(dim=1), max=1.0) # somma in 0
+        vec = pooled
     
         return {
                 'seg_vessels': out1,
@@ -108,4 +110,3 @@ class UNet3D(nn.Module):
                 'class': vec
             }
     
-

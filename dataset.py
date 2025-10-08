@@ -110,6 +110,16 @@ class RSNA3DDataset(Dataset):
         sample["vessels"] = np.transpose(sample["vessels"], (2, 0, 1))  # (D, H, W)
         sample["aneurysms"] = np.transpose(sample["aneurysms"], (2, 0, 1))  # (D, H, W)
 
+        if sample["image"].shape[0] < self.maximum_slices:
+            # Padding per avere sempre dimensione (16, H, W)
+            pad_width = self.maximum_slices - sample["image"].shape[0]
+            pad_before = pad_width // 2
+            pad_after = pad_width - pad_before
+
+            sample["image"] = np.pad(sample["image"], ((pad_before, pad_after), (0, 0), (0, 0)), mode='constant', constant_values=0)
+            sample["vessels"] = np.pad(sample["vessels"], ((pad_before, pad_after), (0, 0), (0, 0)), mode='constant', constant_values=-1)
+            sample["aneurysms"] = np.pad(sample["aneurysms"], ((pad_before, pad_after), (0, 0), (0, 0)), mode='constant', constant_values=0)
+
         # Converti in tensori dopo le trasformazioni
         sample["image"] = torch.from_numpy(sample["image"]).unsqueeze(0).float()  # (1, D, H, W)
         sample["vessels"] = torch.from_numpy(sample["vessels"]).long()  # (D, H, W)

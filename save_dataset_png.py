@@ -109,10 +109,12 @@ localizers = pd.read_csv(localizers_path)
 new_records = []
 
 # ===== 3. Loop sulle serie =====
-for series_path in series_dirs:
+for series_path in series_dirs[1979:]:
     series_id = os.path.basename(series_path)
     print(f"Processing series: {series_id}")
 
+    if os.path.exists(os.path.join(output_base, "series", series_id)):
+        continue
 
     # ----- Leggi i DICOM -----
     reader = sitk.ImageSeriesReader()

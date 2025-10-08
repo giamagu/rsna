@@ -46,8 +46,8 @@ def main():
 
     DEVICE = "cpu"#torch.device("cuda" if torch.cuda.is_available() else "cpu")
     BATCH_SIZE = 4
-    EPOCHS = 30
-    LR = 1e-3
+    EPOCHS = 1
+    LR = 2e-3
 
     # ==============================
     # CREA O CARICA SPLIT
@@ -80,11 +80,10 @@ def main():
     image_size = 224
     train_transforms = A.Compose(
         [
-            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, border_mode=0, p=0.5),
-            A.ElasticTransform(alpha=1, sigma=10, p=0.5),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit = 0.2, p=0.5),
+            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=5, border_mode=0, p=0.3),
+            A.HorizontalFlip(p=0.3),
+            A.VerticalFlip(p=0.3),
+            A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit = 0.1, p=0.3),
         ],
     additional_targets={
         "vessels": "mask",  # Le segmentazioni dei vasi sono trattate come maschere
@@ -93,8 +92,8 @@ def main():
 )
 
 
-    train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series, transform=train_transforms)
-    val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series)
+    train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series[:600], transform=train_transforms)
+    val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series[:100])
 
     train_dataset[0]
 
@@ -170,7 +169,7 @@ def main():
 
             total_loss += loss.item()
 
-            #print(f"Epoch {epoch+1}/{EPOCHS} | Batch {i+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
+            print(f"Epoch {epoch+1}/{EPOCHS} | Batch {i+1}/{len(train_loader)} | Loss vec: {loss_vec.item():.4f} | Loss ane: {loss_aneurysm.item():.4f} | Loss vessels: {loss_vessels.item():.4f}")
 
             i += 1
 
@@ -200,12 +199,12 @@ def main():
         print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
         # Salvataggio checkpoint ogni 10 epoche
-        if (epoch + 1) % 10 == 0:
+        if True:#(epoch + 1) % 10 == 0:
             ckpt_path = f"checkpoint_epoch_{epoch+1}.pth"
             torch.save(model.state_dict(), ckpt_path)
             print(f"Checkpoint salvato: {ckpt_path}")
 
-    ckpt_path = "checkpoint_epoch_30.pth"
+    ckpt_path = "checkpoint_epoch_1.pth"
     model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
     model.eval()
 
