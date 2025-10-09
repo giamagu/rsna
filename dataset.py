@@ -2,9 +2,10 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+import random
 
 class RSNA3DDataset(Dataset):
-    def __init__(self, root_dir, series_ids, transform=None):
+    def __init__(self, root_dir, series_ids, maximum_slices = 16, minimum_slices = 16, transform=None):
         """
         Args:
             root_dir (str): directory principale del dataset resampled_dataset
@@ -20,7 +21,8 @@ class RSNA3DDataset(Dataset):
         self.vessels_dir = os.path.join(root_dir, "segmentations_cowseg")
         self.transform = transform
         self.series_ids = series_ids
-        self.maximum_slices = 16
+        self.maximum_slices = maximum_slices
+        self.minimum_slices = minimum_slices
 
         # Lista delle cartelle → assumiamo che abbiano lo stesso nome
         self.ids = []
@@ -54,12 +56,37 @@ class RSNA3DDataset(Dataset):
         except:
             y_vessels = np.zeros_like(x, dtype=np.float32) - 1
 
-        # Estrai un sottoslice di dimensione 8xHxW
+        # Trova i canali in cui c'è almeno un 1 in y_aneurysm
+        channels_with_aneurysm = np.any(y_aneurysm > 0, axis=(1, 2))
+
+        # Crea un array con gli indici dei canali
+        aneurysm_channels = np.where(channels_with_aneurysm)[0]
+
         if x.shape[0] > self.maximum_slices:
-            start_idx = np.random.randint(0, x.shape[0] - self.maximum_slices + 1)
-            x = x[start_idx:start_idx + self.maximum_slices]
-            y_aneurysm = y_aneurysm[start_idx:start_idx + self.maximum_slices]
-            y_vessels = y_vessels[start_idx:start_idx + self.maximum_slices]
+
+            if random.random() < 0.75 and len(aneurysm_channels) > 0:
+                selected_channel = random.choice(aneurysm_channels)
+                start_idx = max(0, selected_channel - random.randint(2, self.maximum_slices - 3))
+            else:
+                start_idx = np.random.randint(0, x.shape[0] - self.maximum_slices + 1)
+
+            # Estrai un sottoslice di dimensione 16xHxW
+            if x.shape[0] > self.maximum_slices:
+                x = x[start_idx:start_idx + self.maximum_slices]
+                y_aneurysm = y_aneurysm[start_idx:start_idx + self.maximum_slices]
+                y_vessels = y_vessels[start_idx:start_idx + self.maximum_slices]
+            if x.shape[0] > self.minimum_slices and x.shape[0] % self.minimum_slices != 0:
+                # Riduci a un multiplo di minimum_slices
+                new_depth = (x.shape[0] // self.minimum_slices) * self.minimum_slices
+                leftover = x.shape[0] - new_depth
+                start_crop = leftover // 2
+                x = x[start_crop:start_crop + new_depth]
+                y_aneurysm = y_aneurysm[start_crop:start_crop + new_depth]
+                y_vessels = y_vessels[start_crop:start_crop + new_depth]
+
+        if np.max(y_vessels) > 200:
+            a = 1
+            
 
         # Crea vettore 14-D da aneurysm label
         # posizione 0 = generico (1 se c’è almeno un aneurisma in qualunque vaso)
@@ -110,15 +137,20 @@ class RSNA3DDataset(Dataset):
         sample["vessels"] = np.transpose(sample["vessels"], (2, 0, 1))  # (D, H, W)
         sample["aneurysms"] = np.transpose(sample["aneurysms"], (2, 0, 1))  # (D, H, W)
 
-        if sample["image"].shape[0] < self.maximum_slices:
+        if sample["image"].shape[0] < self.minimum_slices:
             # Padding per avere sempre dimensione (16, H, W)
-            pad_width = self.maximum_slices - sample["image"].shape[0]
+            pad_width = self.minimum_slices - sample["image"].shape[0]
             pad_before = pad_width // 2
             pad_after = pad_width - pad_before
 
             sample["image"] = np.pad(sample["image"], ((pad_before, pad_after), (0, 0), (0, 0)), mode='constant', constant_values=0)
-            sample["vessels"] = np.pad(sample["vessels"], ((pad_before, pad_after), (0, 0), (0, 0)), mode='constant', constant_values=-1)
+            sample["vessels"] = np.pad(sample["vessels"], ((pad_before, pad_after), (0, 0), (0, 0)), mode='constant', constant_values=0)
             sample["aneurysms"] = np.pad(sample["aneurysms"], ((pad_before, pad_after), (0, 0), (0, 0)), mode='constant', constant_values=0)
+
+        if np.max(sample["vessels"]) > 200:
+            a = 1
+        if np.max(sample["aneurysms"]) > 200:
+            a = 1
 
         # Converti in tensori dopo le trasformazioni
         sample["image"] = torch.from_numpy(sample["image"]).unsqueeze(0).float()  # (1, D, H, W)

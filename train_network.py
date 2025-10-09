@@ -44,10 +44,10 @@ def main():
     DATASET_DIR = "resampled_dataset"
     SPLIT_FILE = os.path.join(DATASET_DIR, "split.json")
 
-    DEVICE = "cpu"#torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    BATCH_SIZE = 4
-    EPOCHS = 1
-    LR = 2e-3
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    BATCH_SIZE = 8
+    EPOCHS = 12
+    LR = 4e-3
 
     # ==============================
     # CREA O CARICA SPLIT
@@ -80,25 +80,27 @@ def main():
     image_size = 224
     train_transforms = A.Compose(
         [
-            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=5, border_mode=0, p=0.3),
+            #A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=5, border_mode=0, p=0.3),
             A.HorizontalFlip(p=0.3),
             A.VerticalFlip(p=0.3),
-            A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit = 0.1, p=0.3),
+            #A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit = 0.1, p=0.3),
         ],
-    additional_targets={
-        "vessels": "mask",  # Le segmentazioni dei vasi sono trattate come maschere
-        "aneurysms": "mask"  # Le segmentazioni degli aneurismi sono trattate come maschere
-    }
-)
+        additional_targets={
+            "vessels": "mask",  # Le segmentazioni dei vasi sono trattate come maschere
+            "aneurysms": "mask"  # Le segmentazioni degli aneurismi sono trattate come maschere
+        }
+    )
+
+    train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series)#, transform=train_transforms)
+    val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series, minimum_slices = 16, maximum_slices=1000000)
 
 
-    train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series[:600], transform=train_transforms)
-    val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series[:100])
-
-    train_dataset[0]
+    #tot = np.array(train_dataset[0]["aneurysm_vector"])
+    #for x in train_dataset:
+    #    tot += np.array(x["aneurysm_vector"])
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, drop_last =True)
-    val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+    val_loader   = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4)
 
     # ==============================
     # MODEL
@@ -136,32 +138,35 @@ def main():
     criterion_seg = nn.CrossEntropyLoss()
     criterion_vec = nn.BCEWithLogitsLoss()
 
-    optimizer = optim.Adam(model.parameters(), lr=LR)
-
     # ==============================
     # TRAINING LOOP
     # ==============================
     for epoch in range(EPOCHS):
+        LR *= 0.8
+        LR = max(LR, 4e-4)
+        optimizer = optim.Adam(model.parameters(), lr=LR)
         model.train()
         total_loss = 0.0
 
         i = 0
 
         for batch in train_loader:
+
             inputs = batch["image"].to(DEVICE, dtype=torch.float32)
             seg_vessels_gt = batch["vessels"].to(DEVICE, dtype=torch.long)
             seg_aneurysm_gt = batch["aneurysms"].to(DEVICE, dtype=torch.long)
             vec_gt = batch["aneurysm_vector"].to(DEVICE, dtype=torch.float32)
 
-            optimizer.zero_grad()
+            #optimizer.zero_grad()
             outputs = model(inputs)
 
             loss_vessels = torch.tensor(0.0, device=DEVICE)
             for k in range(seg_vessels_gt.shape[0]):
                 if seg_vessels_gt[k].min().item() > -0.5:
+                    outputs["seg_vessels"][k:k+1], seg_vessels_gt[k:k+1]
                     loss_vessels += criterion_seg(outputs["seg_vessels"][k:k+1], seg_vessels_gt[k:k+1])
             loss_aneurysm = criterion_seg(outputs["seg_aneurysms"], seg_aneurysm_gt)
-            loss_vec = criterion_vec(outputs["class"], vec_gt) / 10
+            loss_vec = criterion_vec(outputs["class"], vec_gt) / 3
 
             loss = loss_vessels + loss_aneurysm + loss_vec
             loss.backward()
@@ -175,53 +180,69 @@ def main():
 
         avg_train_loss = total_loss / len(train_loader)
 
+
+
         # VALIDATION
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for batch in val_loader:
-                inputs = batch["image"].to(DEVICE, dtype=torch.float32)
-                seg_vessels_gt = batch["vessels"].to(DEVICE, dtype=torch.long)
-                seg_aneurysm_gt = batch["aneurysms"].to(DEVICE, dtype=torch.long)
-                vec_gt = batch["aneurysm_vector"].to(DEVICE, dtype=torch.float32)
+        #model.eval()
+        #val_loss = 0.0
+        #with torch.no_grad():
+        #    for batch in val_loader:
+        #        inputs = batch["image"].to(DEVICE, dtype=torch.float32)
+        #        seg_vessels_gt = batch["vessels"].to(DEVICE, dtype=torch.long)
+        #        seg_aneurysm_gt = batch["aneurysms"].to(DEVICE, dtype=torch.long)
+        #        vec_gt = batch["aneurysm_vector"].to(DEVICE, dtype=torch.float32)
 
-                outputs = model(inputs)
+        #        start = 0
+        #        while start < inputs.shape[2]:
 
-                #loss_vessels = criterion_seg(outputs["seg_vessels"], seg_vessels_gt)
-                loss_aneurysm = criterion_seg(outputs["seg_aneurysms"], seg_aneurysm_gt)
-                loss_vec = criterion_vec(outputs["class"], vec_gt)
+        #            outputs = model(inputs[:,:,start:start+256,:,:])
 
-                loss = loss_aneurysm + loss_vec
-                val_loss += loss.item()
+                    #loss_vessels = criterion_seg(outputs["seg_vessels"], seg_vessels_gt)
+        #            loss_aneurysm = criterion_seg(outputs["seg_aneurysms"], seg_aneurysm_gt[:,start:start+256,:,:])
+        #            loss_vec = criterion_vec(outputs["class"], vec_gt) / 3
 
-        avg_val_loss = val_loss / len(val_loader)
+        #            loss = loss_vessels + loss_aneurysm + loss_vec
+        #            val_loss += loss.item()
 
-        print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        #            start += 256
+
+        #avg_val_loss = val_loss / len(val_loader)
+
+        #print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
         # Salvataggio checkpoint ogni 10 epoche
-        if True:#(epoch + 1) % 10 == 0:
-            ckpt_path = f"checkpoint_epoch_{epoch+1}.pth"
-            torch.save(model.state_dict(), ckpt_path)
-            print(f"Checkpoint salvato: {ckpt_path}")
+        #if (epoch + 1) % 4 == 0:
+        #    ckpt_path = f"checkpoint_epoch_{epoch+1}.pth"
+        #    torch.save(model.state_dict(), ckpt_path)
+        #    print(f"Checkpoint salvato: {ckpt_path}")
 
-    ckpt_path = "checkpoint_epoch_1.pth"
+    ckpt_path = "checkpoint_epoch_12.pth"
     model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
     model.eval()
 
     labels = []
     preds = []
 
-    for i in range(len(train_dataset)):
-        sample = train_dataset[i]
+    for i in range(len(val_dataset)):
+        sample = val_dataset[i]
         leftover = sample["image"].shape[1]%16
         left_over_left = int(leftover/2)
         left_over_right = leftover - left_over_left
         if leftover > 0:
-            out = model(sample["image"][:, left_over_left:-left_over_right, :, :].unsqueeze(0).to(DEVICE))
+            inp = sample["image"][:, left_over_left:-left_over_right, :, :].unsqueeze(0).to(DEVICE)
         else:
-            out = model(sample["image"].unsqueeze(0).to(DEVICE))
+            inp = sample["image"].unsqueeze(0).to(DEVICE)
+        
+        start = 0
+        pred_out = [0]*14
+        while start < inp.shape[2]:
+            out = model(inp[:,:,start:start+256,:,:])
+            start += 240
+            l = torch.sigmoid(out["class"].to(DEVICE).cpu()).detach().numpy().tolist()[0]
+            pred_out = [max(pred_out[j], l[j]) for j in range(14)]
+        
         labels.append(sample["aneurysm_vector"].tolist())
-        preds.append(torch.sigmoid(out["class"].to(DEVICE).cpu()).detach().numpy().tolist()[0])
+        preds.append(pred_out)
         a = 1
 
     # Calculate AUC

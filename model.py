@@ -97,9 +97,9 @@ class UNet3D(nn.Module):
         out2 = self.head2(x)  # [B,14,D,H,W]
 
         # global classification: max pooling sui voxel
-        pred = out1.clone()
+        pred = out2.clone()
         pred[:,0,:,:,:] = -pred[:,0,:,:,:]
-        pooled = self.global_pool(out1).view(out1.size(0), -1)  # [B,14]
+        pooled = self.global_pool(pred).view(pred.size(0), -1)  # [B,14]
 
         # Copia i valori 1-13, metti somma in 0
         vec = pooled
