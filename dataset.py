@@ -4,8 +4,28 @@ import torch
 from torch.utils.data import Dataset
 import random
 
+# ===== Funzione di utilità per il plot =====
+import matplotlib.pyplot as plt
+
+def plot_x_y_slice(x, y, idx=274):
+    """
+    Plotta fianco a fianco x[idx,:,:] e y[idx,:,:].
+    """
+    plt.figure(figsize=(8,4))
+    plt.subplot(1,2,1)
+    plt.imshow(x[idx,:,:], cmap='gray')
+    plt.title(f'x[{idx}]')
+    plt.axis('off')
+    plt.subplot(1,2,2)
+    plt.imshow(y[idx,:,:], cmap='gray')
+    plt.title(f'y[{idx}]')
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+
 class RSNA3DDataset(Dataset):
-    def __init__(self, root_dir, series_ids, maximum_slices = 16, minimum_slices = 16, transform=None):
+    def __init__(self, root_dir, series_ids, maximum_slices = 16, minimum_slices = 16, transform=None, only_vessels = False):
         """
         Args:
             root_dir (str): directory principale del dataset resampled_dataset
@@ -23,11 +43,14 @@ class RSNA3DDataset(Dataset):
         self.series_ids = series_ids
         self.maximum_slices = maximum_slices
         self.minimum_slices = minimum_slices
+        self.only_vessels = only_vessels
 
         # Lista delle cartelle → assumiamo che abbiano lo stesso nome
         self.ids = []
         for dir in os.listdir(self.series_dir):
             if dir in self.series_ids:
+                if self.only_vessels and not os.path.exists(os.path.join(self.vessels_dir, dir)):
+                    continue
                 self.ids.append(dir)
         self.ids.sort()
 
@@ -147,7 +170,7 @@ class RSNA3DDataset(Dataset):
             sample["vessels"] = np.pad(sample["vessels"], ((pad_before, pad_after), (0, 0), (0, 0)), mode='constant', constant_values=0)
             sample["aneurysms"] = np.pad(sample["aneurysms"], ((pad_before, pad_after), (0, 0), (0, 0)), mode='constant', constant_values=0)
 
-        if np.max(sample["vessels"]) > 200:
+        if np.max(sample["vessels"]) > 0.5:
             a = 1
         if np.max(sample["aneurysms"]) > 200:
             a = 1
@@ -157,5 +180,4 @@ class RSNA3DDataset(Dataset):
         sample["vessels"] = torch.from_numpy(sample["vessels"]).long()  # (D, H, W)
         sample["aneurysms"] = torch.from_numpy(sample["aneurysms"]).long()  # (D, H, W)
         sample["aneurysm_vector"] = torch.from_numpy(sample["aneurysm_vector"]).float()  # (14,)
-
         return sample

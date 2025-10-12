@@ -1,3 +1,4 @@
+
 import os
 import json
 import random
@@ -20,21 +21,40 @@ def evaluate_score(labels, preds):
     labels_array = np.array(labels)  # Shape: (N, 14)
     preds_array = np.array(preds)    # Shape: (N, 14)
 
+    aucs = []
+
     # Calcola l'AUC per la prima componente (AUC_0)
-    auc_0 = roc_auc_score(labels_array[:, 0], preds_array[:, 0])
 
     # Calcola l'AUC per le altre componenti (AUC_1, ..., AUC_13)
     auc_rest = 0
     meaningful_classes = 0
-    for i in range(1, 14):
-        auc_i = roc_auc_score(labels_array[:, i], preds_array[:, i])
-        if not np.isnan(auc_i):
-            meaningful_classes += 1
-            auc_rest += auc_i
-
+    for i in range(14):
+        try:
+            aucs.append(roc_auc_score(labels_array[:, i], preds_array[:, i]))
+        except:
+            aucs.append(-1)
+            
     # Calcola l'AUC totale
-    auc_total = auc_0 + (1 / meaningful_classes) * auc_rest
-    return auc_total / 2
+    return aucs
+
+def evaluate_score_seg(labels, preds):
+    # Converti labels e preds in array NumPy
+    labels_array = np.array(labels)  # Shape: (N, 14)
+    preds_array = np.array(preds)    # Shape: (N, 14)
+
+    # Calcola l'AUC per la prima componente (AUC_0)
+    # Calcola l'AUC per le altre componenti (AUC_1, ..., AUC_13)
+    auc_rest = 0
+    meaningful_classes = 0
+
+    aucs = []
+    for i in range(14):
+        try:
+            aucs.append(roc_auc_score(labels_array[:, i].flatten().tolist(), preds_array[:, i].flatten().tolist()))
+        except:
+            aucs.append(-1)
+
+    return aucs
 
 def main():
 
@@ -80,7 +100,7 @@ def main():
     image_size = 224
     train_transforms = A.Compose(
         [
-            #A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=5, border_mode=0, p=0.3),
+            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=5, border_mode=0, p=0.3),
             A.HorizontalFlip(p=0.3),
             A.VerticalFlip(p=0.3),
             #A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit = 0.1, p=0.3),
@@ -91,8 +111,8 @@ def main():
         }
     )
 
-    train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series)#, transform=train_transforms)
-    val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series, minimum_slices = 16, maximum_slices=1000000)
+    train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series, only_vessels = True, transform=train_transforms)
+    val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series, only_vessels = True, minimum_slices = 16, maximum_slices=1000000)
 
 
     #tot = np.array(train_dataset[0]["aneurysm_vector"])
@@ -101,7 +121,6 @@ def main():
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, drop_last =True)
     val_loader   = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4)
-
     # ==============================
     # MODEL
     # ==============================
@@ -135,17 +154,35 @@ def main():
     # ==============================
     # LOSSES & OPTIMIZER
     # ==============================
-    criterion_seg = nn.CrossEntropyLoss()
+    weights = np.array([1.0] + [100000.0]*13, dtype = np.float32)
+    weights = weights / weights.sum() * 14
+    criterion_seg_an = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE))
+
+    weights = np.array([1.0] + [1000.0]*13,  dtype = np.float32)
+    weights = weights / weights.sum() * 14
+    criterion_seg_ves = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE))
+
     criterion_vec = nn.BCEWithLogitsLoss()
 
     # ==============================
     # TRAINING LOOP
     # ==============================
+    model.train()
+
+    optimizer = optim.Adam(model.parameters(), lr=LR)
+    
     for epoch in range(EPOCHS):
-        LR *= 0.8
-        LR = max(LR, 4e-4)
-        optimizer = optim.Adam(model.parameters(), lr=LR)
-        model.train()
+
+        if epoch == 30:
+            train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series, only_vessels = False)#, transform=train_transforms)
+            val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series, only_vessels = False, minimum_slices = 16, maximum_slices=1000000)
+
+            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, drop_last =True)
+            val_loader   = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4)
+
+            LR = 1e-3
+            optimizer = optim.Adam(model.parameters(), lr=LR)
+        
         total_loss = 0.0
 
         i = 0
@@ -157,16 +194,16 @@ def main():
             seg_aneurysm_gt = batch["aneurysms"].to(DEVICE, dtype=torch.long)
             vec_gt = batch["aneurysm_vector"].to(DEVICE, dtype=torch.float32)
 
-            #optimizer.zero_grad()
+            optimizer.zero_grad()
             outputs = model(inputs)
 
             loss_vessels = torch.tensor(0.0, device=DEVICE)
             for k in range(seg_vessels_gt.shape[0]):
                 if seg_vessels_gt[k].min().item() > -0.5:
                     outputs["seg_vessels"][k:k+1], seg_vessels_gt[k:k+1]
-                    loss_vessels += criterion_seg(outputs["seg_vessels"][k:k+1], seg_vessels_gt[k:k+1])
-            loss_aneurysm = criterion_seg(outputs["seg_aneurysms"], seg_aneurysm_gt)
-            loss_vec = criterion_vec(outputs["class"], vec_gt) / 3
+                    loss_vessels += criterion_seg_ves(outputs["seg_vessels"][k:k+1], seg_vessels_gt[k:k+1])
+            loss_aneurysm = criterion_seg_an(outputs["seg_aneurysms"], seg_aneurysm_gt)
+            loss_vec = criterion_vec(outputs["class"], vec_gt)
 
             loss = loss_vessels + loss_aneurysm + loss_vec
             loss.backward()
@@ -220,6 +257,10 @@ def main():
     model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
     model.eval()
 
+    labels_ane = np.zeros([14, 0, 224, 224])
+    preds_ane = np.zeros([14, 0, 224, 224])
+    labels_seg = np.zeros([14, 0, 224, 224])
+    preds_seg = np.zeros([14, 0, 224, 224])
     labels = []
     preds = []
 
@@ -236,10 +277,18 @@ def main():
         start = 0
         pred_out = [0]*14
         while start < inp.shape[2]:
-            out = model(inp[:,:,start:start+256,:,:])
-            start += 240
+            out = model(inp[:,:,start:start+64,:,:])
+            start += 40
             l = torch.sigmoid(out["class"].to(DEVICE).cpu()).detach().numpy().tolist()[0]
             pred_out = [max(pred_out[j], l[j]) for j in range(14)]
+
+            preds_ane = np.concatenate([preds_ane, torch.sigmoid(out["seg_aneurysms"].to(DEVICE).cpu()).detach().numpy()[0]], axis = 1)
+            label = np.array([sample["aneurysms"][start:start+64,:,:].detach().numpy() == i for i in range(14)])
+            labels_ane = np.concatenate([labels_ane, label], axis = 1)
+
+            preds_seg = np.concatenate([preds_seg, torch.sigmoid(out["seg_vessels"].to(DEVICE).cpu()).detach().numpy()[0]], axis = 1)
+            label = np.array([sample["vessels"][start:start+64,:,:].detach().numpy() == i for i in range(14)])
+            labels_seg = np.concatenate([labels_seg, label], axis = 1)
         
         labels.append(sample["aneurysm_vector"].tolist())
         preds.append(pred_out)
@@ -247,6 +296,8 @@ def main():
 
     # Calculate AUC
     auc_score = evaluate_score(labels, preds)
+    auc_score_ane = evaluate_score_seg(labels_ane, preds_ane)
+    auc_score_ves = evaluate_score_seg(labels_ane, preds_ane)
     print(f"AUC Score: {auc_score:.4f}")
 
 

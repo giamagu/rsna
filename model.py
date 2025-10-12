@@ -78,8 +78,9 @@ class UNet3D(nn.Module):
         self.head1 = OutConv3D(base_ch, num_classes_head1)
         self.head2 = OutConv3D(base_ch, num_classes_head2)
 
-        # Global classification: max pooling senza Linear
+        # Global classification: max pooling + Dense
         self.global_pool = nn.AdaptiveMaxPool3d(1)
+        self.classifier = nn.Linear(num_classes_head2, 14)
 
     def forward(self, x):
         x1 = self.inc(x)
@@ -100,13 +101,10 @@ class UNet3D(nn.Module):
         pred = out2.clone()
         pred[:,0,:,:,:] = -pred[:,0,:,:,:]
         pooled = self.global_pool(pred).view(pred.size(0), -1)  # [B,14]
-
-        # Copia i valori 1-13, metti somma in 0
-        vec = pooled
-    
+        vec = self.classifier(pooled)  # [B,14]
         return {
-                'seg_vessels': out1,
-                'seg_aneurysms': out2,
-                'class': vec
-            }
+            'seg_vessels': out1,
+            'seg_aneurysms': out2,
+            'class': vec
+        }
     
