@@ -79,7 +79,7 @@ class UNet3D(nn.Module):
         self.head2 = OutConv3D(base_ch, num_classes_head2)
 
         self.depthwise_conv = nn.Conv3d(14, 14, kernel_size=3, padding=1, groups=14)
-        
+
         # Global classification: max pooling + Dense
         self.global_pool = nn.AdaptiveMaxPool3d(1)
         self.classifier = nn.Linear(num_classes_head2, 14)
@@ -99,15 +99,13 @@ class UNet3D(nn.Module):
         out1 = self.head1(x)  # [B,14,D,H,W]
         out2 = self.head2(x)  # [B,14,D,H,W]
 
-        out1 = F.softmax(out1, dim=1)  # Apply softmax to the first output
-        out2 = F.softmax(out2, dim=1)  # Apply softmax to the second output
+        pred = F.softmax(out2, dim=1)  # Apply softmax to the second output
 
-        pred = self.depthwise_conv(out2)
 
         # global classification: max pooling sui voxel
-        pred[:,0,:,:,:] = -pred[:,0,:,:,:]
+        pred[:,0,:,:,:] = 1-pred[:,0,:,:,:]
         pooled = self.global_pool(pred).view(pred.size(0), -1)  # [B,14]
-        vec = self.classifier(pooled)  # [B,14]
+        vec = torch.logit(pooled)  # [B,14]
         return {
             'seg_vessels': out1,
             'seg_aneurysms': out2,

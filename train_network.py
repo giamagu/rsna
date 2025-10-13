@@ -86,8 +86,8 @@ def main():
     SPLIT_FILE = os.path.join(DATASET_DIR, "split.json")
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    BATCH_SIZE = 8
-    EPOCHS = 12
+    BATCH_SIZE = 4
+    EPOCHS = 40
     LR = 4e-3
 
     # ==============================
@@ -177,11 +177,11 @@ def main():
     # ==============================
     weights = np.array([1.0] + [100000.0]*13, dtype = np.float32)
     weights = weights / weights.sum() * 14
-    criterion_seg_an = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE), from_logits=False)
+    criterion_seg_an = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE))
 
     weights = np.array([1.0] + [1000.0]*13,  dtype = np.float32)
     weights = weights / weights.sum() * 14
-    criterion_seg_ves = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE), from_logits=False)
+    criterion_seg_ves = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE))
 
     criterion_vec = nn.BCEWithLogitsLoss()
 
@@ -192,10 +192,10 @@ def main():
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
     
-    for epoch in range(EPOCHS):
+    '''for epoch in range(EPOCHS):
 
-        if epoch == 30:
-            train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series, only_vessels = False)#, transform=train_transforms)
+        if epoch == 20:
+            train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series, only_vessels = False, transform=train_transforms)
             val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series, only_vessels = False, minimum_slices = 16, maximum_slices=1000000)
 
             train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, drop_last =True)
@@ -226,7 +226,11 @@ def main():
             loss_aneurysm = criterion_seg_an(outputs["seg_aneurysms"], seg_aneurysm_gt)
             loss_vec = criterion_vec(outputs["class"], vec_gt)
 
-            loss = loss_vessels + loss_aneurysm + loss_vec
+            if epoch > 30:
+                loss = loss_vessels + loss_aneurysm + loss_vec
+            else:
+                loss = loss_vessels + loss_aneurysm
+
             loss.backward()
             optimizer.step()
 
@@ -269,12 +273,12 @@ def main():
         #print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
         # Salvataggio checkpoint ogni 10 epoche
-        #if (epoch + 1) % 4 == 0:
-        #    ckpt_path = f"checkpoint_epoch_{epoch+1}.pth"
-        #    torch.save(model.state_dict(), ckpt_path)
-        #    print(f"Checkpoint salvato: {ckpt_path}")
+        if (epoch + 1) % 4 == 0:
+            ckpt_path = f"checkpoint_epoch_{epoch+1}.pth"
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"Checkpoint salvato: {ckpt_path}")'''
 
-    ckpt_path = "checkpoint_epoch_60.pth"
+    ckpt_path = "checkpoint_epoch_28.pth"
     model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
     model.eval()
 
@@ -292,21 +296,18 @@ def main():
 
     val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series, only_vessels = False, minimum_slices = 16, maximum_slices=1000000)
 
-    for i in range(100):#len(val_dataset)):
+    for i in range(50):#len(val_dataset)):
+        print(i)
         sample = val_dataset[i]
-        leftover = sample["image"].shape[1]%16
-        left_over_left = int(leftover/2)
-        left_over_right = leftover - left_over_left
-        if leftover > 0:
-            inp = sample["image"][:, left_over_left:-left_over_right, :, :].unsqueeze(0).to(DEVICE)
-            sample["aneurysms"] = sample["aneurysms"][left_over_left:-left_over_right, :, :]
-            sample["vessels"] = sample["vessels"][left_over_left:-left_over_right, :, :]
-        else:
-            inp = sample["image"].unsqueeze(0).to(DEVICE)
+        inp = sample["image"].unsqueeze(0).to(DEVICE)
         
         start = 0
         pred_out = [0]*14
-        while start < inp.shape[2]:
+        must_stop = False
+        while start < inp.shape[2] and not must_stop:
+            if start + 64 > inp.shape[2]:
+                start = inp.shape[2] - 64
+                must_stop = True
             out = model(inp[:,:,start:start+64,:,:])
             l = torch.sigmoid(out["class"].to(DEVICE).cpu()).detach().numpy().tolist()[0]
             pred_out = [max(pred_out[j], l[j]) for j in range(14)]
@@ -323,8 +324,7 @@ def main():
                 negative_preds_counter_ane[c] += np.bincount(negative_preds, minlength=10001)
                 positive_preds_counter_ane[c] += np.bincount(positive_preds, minlength=10001)
 
-
-            preds_seg = torch.sigmoid(out["seg_vessels"].to(DEVICE).cpu()).detach().numpy()[0]
+            preds_seg = torch.softmax(out["seg_vessels"].to(DEVICE).cpu(), axis = 1).detach().numpy()[0]
             label = np.array([sample["vessels"][start:start+64,:,:].detach().numpy() == i for i in range(14)])
             #labels_seg = np.concatenate([labels_seg, label], axis = 1)
             preds_seg = (preds_seg * 10000).astype(int)
@@ -336,16 +336,24 @@ def main():
                 negative_preds_counter_seg[c] += np.bincount(negative_preds, minlength=10001)
                 positive_preds_counter_seg[c] += np.bincount(positive_preds, minlength=10001)
 
-            start += 40
+            start += 48
         
         labels.append(sample["aneurysm_vector"].tolist())
         preds.append(pred_out)
         a = 1
 
+    # Save labels and predictions
+    np.save('labels.npy', np.array(labels))
+    np.save('preds.npy', np.array(preds))
+    np.save('positive_preds_counter_ane.npy', np.array(positive_preds_counter_ane))
+    np.save('negative_preds_counter_ane.npy', np.array(negative_preds_counter_ane))
+    np.save('positive_preds_counter_seg.npy', np.array(positive_preds_counter_seg))
+    np.save('negative_preds_counter_seg.npy', np.array(negative_preds_counter_seg))
+
     # Calculate AUC
     auc_score = evaluate_score(labels, preds)
-    auc_score_ane = evaluate_score_seg(labels_ane, preds_ane)
-    auc_score_ves = evaluate_score_seg(labels_seg, preds_seg)
+    auc_score_ane = evaluate_score_seg(positive_preds_counter_ane, negative_preds_counter_ane)
+    auc_score_ves = evaluate_score_seg(positive_preds_counter_seg, negative_preds_counter_seg)
     print(f"AUC Score: {auc_score:.4f}")
 
 
