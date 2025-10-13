@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, Subset
 import numpy as np
 
 from dataset import RSNA3DDataset
-from model import UNet3D
+from model import MultiTask3DNet
 from sklearn.metrics import roc_auc_score
 import matplotlib.pyplot as plt
 import albumentations as A
@@ -145,7 +145,13 @@ def main():
     # ==============================
     # MODEL
     # ==============================
-    model = UNet3D(
+    model = MultiTask3DNet(
+        in_channels=1,
+        num_vessel_classes=14,
+        num_aneurysm_classes=14,
+        num_classification_classes=14,
+        pretrained=True,
+        freeze_backbone=False
     ).to(DEVICE)
 
     '''ckpt_path = "checkpoint_epoch_30.pth"
@@ -192,7 +198,7 @@ def main():
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
     
-    '''for epoch in range(EPOCHS):
+    for epoch in range(EPOCHS):
 
         if epoch == 20:
             train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series, only_vessels = False, transform=train_transforms)
@@ -276,7 +282,7 @@ def main():
         if (epoch + 1) % 4 == 0:
             ckpt_path = f"checkpoint_epoch_{epoch+1}.pth"
             torch.save(model.state_dict(), ckpt_path)
-            print(f"Checkpoint salvato: {ckpt_path}")'''
+            print(f"Checkpoint salvato: {ckpt_path}")
 
     ckpt_path = "checkpoint_epoch_28.pth"
     model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))

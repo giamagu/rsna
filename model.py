@@ -1,114 +1,102 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
-import numpy as np
-import random
 
 # OPZIONALE: import di qualche backbone pre-addestrato 3D o “inflated” da 2D
 # Per esempio da segmentation_models_pytorch_3d
-from torchvision.models import efficientnet_b0
+from segmentation_models_pytorch_3d import Unet as Unet3D  # encoder+decoder base
 
-# --- Block base: (Conv3d -> BN -> ReLU) * 2
-class DoubleConv3D(nn.Module):
-    def __init__(self, in_ch, out_ch):
+class MultiTask3DNet(nn.Module):
+    def __init__(self, 
+                 in_channels=1,
+                 num_vessel_classes=14,    # 0–13
+                 num_aneurysm_classes=14,   # 0–13
+                 num_classification_classes=14,
+                 pretrained=True,
+                 freeze_backbone=False):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv3d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm3d(out_ch),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm3d(out_ch),
-            nn.ReLU(inplace=True)
+        
+        # Backbone base UNet 3D
+        # Questo Unet restituisce output con canale = classes, tipico smp style
+        # Però lo useremo solo per l'encoder + decoder fino al bottleneck delle caratteristiche (o anche decoder se vuoi)
+        self.base_unet = Unet3D(
+            in_channels=in_channels,
+            classes=1,    # dummy, solo per ottenere feature; eventualmente cambiare
+            encoder_name='efficientnet-b0',  # se supportato
+            encoder_weights='imagenet',      # o altro pretraining
+            activation=None,
+            encoder_depth=4,
+            strides = ((2, 2, 2), (2, 2, 2), (2, 2, 2), (2, 2, 2)),
+            decoder_channels=(256, 128, 64, 32),
         )
-    def forward(self, x):
-        return self.conv(x)
+        # NOTA: se l’Unet3D qui restituisce un solo canale, potresti usarlo solo per encoder e definire tu i decoder.
 
-# --- Downsample (MaxPool -> DoubleConv)
-class Down3D(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.down = nn.Sequential(
-            nn.MaxPool3d(2),
-            DoubleConv3D(in_ch, out_ch)
+        # Se vuoi usare il decoder della base per risparmiare lavoro:
+        # altrimenti costruisci i tuoi decoder
+
+        # Heads di segmentazione
+        # Vasi sanguigni
+        self.seg_vessels_head = nn.Conv3d(
+            in_channels=self.base_unet.decoder.blocks[-1].conv2[0].out_channels,
+            out_channels=num_vessel_classes,
+            kernel_size=1
         )
-    def forward(self, x):
-        return self.down(x)
 
-# --- Upsample (Upsample -> Concat -> DoubleConv)
-class Up3D(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True)
-        self.conv = DoubleConv3D(in_ch, out_ch)
-    def forward(self, x1, x2):
-        x1 = self.up(x1)
-        # padding se dimensioni diverse
-        diffZ = x2.size(2) - x1.size(2)
-        diffY = x2.size(3) - x1.size(3)
-        diffX = x2.size(4) - x1.size(4)
-        x1 = F.pad(x1, [diffX//2, diffX-diffX//2,
-                        diffY//2, diffY-diffY//2,
-                        diffZ//2, diffZ-diffZ//2])
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
+        # Aneurismi
+        self.seg_aneurysms_head = nn.Conv3d(
+            in_channels=self.base_unet.decoder.blocks[-1].conv2[0].out_channels,
+            out_channels=num_aneurysm_classes,
+            kernel_size=1
+        )
 
-# --- Output conv
-class OutConv3D(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.conv = nn.Conv3d(in_ch, out_ch, 1)
-    def forward(self, x):
-        return self.conv(x)
+        # Head classificazione globale
+        # Prendiamo feature via global pooling dal “bottleneck” o da ultima feature dell’encoder/decoder
+        self.global_pool = nn.AdaptiveAvgPool3d((1,1,1))
+        self.classifier = nn.Linear(self.base_unet.decoder.blocks[-1].conv2[0].out_channels, num_classification_classes)
 
-class UNet3D(nn.Module):
-    def __init__(self, in_ch=1, num_classes_head1=14, num_classes_head2=14, base_ch=16):
-        super().__init__()
-        self.inc = DoubleConv3D(in_ch, base_ch)
-        self.down1 = Down3D(base_ch, base_ch*2)
-        self.down2 = Down3D(base_ch*2, base_ch*4)
-        self.down3 = Down3D(base_ch*4, base_ch*8)
-        self.bottom = DoubleConv3D(base_ch*8, base_ch*16)
-        self.up1 = Up3D(base_ch*16 + base_ch*8, base_ch*8)
-        self.up2 = Up3D(base_ch*8 + base_ch*4, base_ch*4)
-        self.up3 = Up3D(base_ch*4 + base_ch*2, base_ch*2)
-        self.up4 = Up3D(base_ch*2 + base_ch, base_ch)
-
-        # Due teste separate per segmentazione
-        self.head1 = OutConv3D(base_ch, num_classes_head1)
-        self.head2 = OutConv3D(base_ch, num_classes_head2)
-
-        self.depthwise_conv = nn.Conv3d(14, 14, kernel_size=3, padding=1, groups=14)
-
-        # Global classification: max pooling + Dense
-        self.global_pool = nn.AdaptiveMaxPool3d(1)
-        self.classifier = nn.Linear(num_classes_head2, 14)
+        # Flag se congelare backbone
+        if freeze_backbone:
+            for param in self.base_unet.parameters():
+                param.requires_grad = False
+            # Però lascia attivi i parametri dei nuovi head
+            for p in self.seg_vessels_head.parameters():
+                p.requires_grad = True
+            for p in self.seg_aneurysms_head.parameters():
+                p.requires_grad = True
+            for p in self.classifier.parameters():
+                p.requires_grad = True
 
     def forward(self, x):
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.bottom(x4)
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
+        """
+        x: tensor di shape (B, in_channels, D, H, W)
+        """
 
-        # due teste segmentazione
-        out1 = self.head1(x)  # [B,14,D,H,W]
-        out2 = self.head2(x)  # [B,14,D,H,W]
+        # Ottieni features dal backbone
+        # per Unet3D lo standard è che ritorna l’output segmentazione, ma vogliamo le feature "intermediate"
+        # Qui assumiamo di poter ottenere le feature dell’ultimo decoder layer
+        features = self.base_unet.encoder(x)  
+        # Questa parte dipende fortemente da come è implementato Unet3D: potresti dover modificare per ottenere il "bottleneck" o "feature map"
+        
+        # Se base_unet ha già un decoder che produce feature di dimensione spaziale D, H, W
+        # altrimenti costruisci uno “decoder custom”
 
-        pred = F.softmax(out2, dim=1)  # Apply softmax to the second output
+        # Useremo una parte del decoder per "espandere" features fino a quella dimensione spaziale finale
+        decoded = self.base_unet.decoder(*features)  # dipende da implementazione
 
+        # Ultimo layer "decoded" è un feature map con shape (B, C_f, D, H, W)
+        # dove C_f = self.base_unet.decoder_channels[-1] (numero di canali finali del decoder)
 
-        # global classification: max pooling sui voxel
-        pred[:,0,:,:,:] = 1-pred[:,0,:,:,:]
-        pooled = self.global_pool(pred).view(pred.size(0), -1)  # [B,14]
-        vec = torch.logit(pooled)  # [B,14]
+        # Heads
+        seg_vessels_logits = self.seg_vessels_head(decoded)        # (B, 14, D, H, W)
+        seg_aneurysms_logits = self.seg_aneurysms_head(decoded)    # (B, 14, D, H, W)
+
+        # Classificazione globale
+        pooled = self.global_pool(decoded)  # (B, C_f, 1,1,1)
+        pooled = pooled.view(pooled.size(0), -1)  # (B, C_f)
+        class_logits = self.classifier(pooled)    # (B, 14)
+
         return {
-            'seg_vessels': out1,
-            'seg_aneurysms': out2,
-            'class': vec
+            'seg_vessels': seg_vessels_logits,
+            'seg_aneurysms': seg_aneurysms_logits,
+            'class': class_logits
         }
-    
