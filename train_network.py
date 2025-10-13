@@ -37,6 +37,26 @@ def evaluate_score(labels, preds):
     # Calcola l'AUC totale
     return aucs
 
+def calculate_auc_from_number(positive_counts, negative_counts):
+    # Numero totale di campioni positivi e negativi
+    total_positives = np.sum(positive_counts)
+    total_negatives = np.sum(negative_counts)
+    
+    # Inizializza l'AUC
+    auc = 0.0
+    
+    # Itera sugli score (da 0 a 10000)
+    cum_negatives = 0  # Cumulativo dei negativi
+    for i in range(len(positive_counts)):
+        # Contributo dell'intervallo all'AUC
+        auc += positive_counts[i] * (cum_negatives + 0.5 * negative_counts[i])
+        cum_negatives += negative_counts[i]
+    
+    # Normalizza l'AUC dividendo per il totale di positivi e negativi
+    auc /= (total_positives * total_negatives)
+    
+    return auc
+
 def evaluate_score_seg(labels, preds):
     # Converti labels e preds in array NumPy
     labels_array = np.array(labels)  # Shape: (N, 14)
@@ -49,10 +69,11 @@ def evaluate_score_seg(labels, preds):
 
     aucs = []
     for i in range(14):
-        try:
-            aucs.append(roc_auc_score(labels_array[:, i].flatten().tolist(), preds_array[:, i].flatten().tolist()))
-        except:
-            aucs.append(-1)
+        if True:
+        #try:
+            aucs.append(calculate_auc_from_number(labels_array[i], preds_array[i]))
+        #except:
+        #    aucs.append(-1)
 
     return aucs
 
@@ -156,11 +177,11 @@ def main():
     # ==============================
     weights = np.array([1.0] + [100000.0]*13, dtype = np.float32)
     weights = weights / weights.sum() * 14
-    criterion_seg_an = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE))
+    criterion_seg_an = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE), from_logits=False)
 
     weights = np.array([1.0] + [1000.0]*13,  dtype = np.float32)
     weights = weights / weights.sum() * 14
-    criterion_seg_ves = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE))
+    criterion_seg_ves = nn.CrossEntropyLoss(weight = torch.Tensor(weights).to(DEVICE), from_logits=False)
 
     criterion_vec = nn.BCEWithLogitsLoss()
 
@@ -253,7 +274,7 @@ def main():
         #    torch.save(model.state_dict(), ckpt_path)
         #    print(f"Checkpoint salvato: {ckpt_path}")
 
-    ckpt_path = "checkpoint_epoch_12.pth"
+    ckpt_path = "checkpoint_epoch_60.pth"
     model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
     model.eval()
 
@@ -264,13 +285,22 @@ def main():
     labels = []
     preds = []
 
-    for i in range(len(val_dataset)):
+    positive_preds_counter_ane = [np.zeros(10001) for i in range(14)]
+    negative_preds_counter_ane = [np.zeros(10001) for i in range(14)]
+    positive_preds_counter_seg = [np.zeros(10001) for i in range(14)]
+    negative_preds_counter_seg = [np.zeros(10001) for i in range(14)]
+
+    val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series, only_vessels = False, minimum_slices = 16, maximum_slices=1000000)
+
+    for i in range(100):#len(val_dataset)):
         sample = val_dataset[i]
         leftover = sample["image"].shape[1]%16
         left_over_left = int(leftover/2)
         left_over_right = leftover - left_over_left
         if leftover > 0:
             inp = sample["image"][:, left_over_left:-left_over_right, :, :].unsqueeze(0).to(DEVICE)
+            sample["aneurysms"] = sample["aneurysms"][left_over_left:-left_over_right, :, :]
+            sample["vessels"] = sample["vessels"][left_over_left:-left_over_right, :, :]
         else:
             inp = sample["image"].unsqueeze(0).to(DEVICE)
         
@@ -278,17 +308,35 @@ def main():
         pred_out = [0]*14
         while start < inp.shape[2]:
             out = model(inp[:,:,start:start+64,:,:])
-            start += 40
             l = torch.sigmoid(out["class"].to(DEVICE).cpu()).detach().numpy().tolist()[0]
             pred_out = [max(pred_out[j], l[j]) for j in range(14)]
 
-            preds_ane = np.concatenate([preds_ane, torch.sigmoid(out["seg_aneurysms"].to(DEVICE).cpu()).detach().numpy()[0]], axis = 1)
+            preds_ane = torch.softmax(out["seg_aneurysms"].to(DEVICE).cpu(), axis = 1).detach().numpy()[0]
             label = np.array([sample["aneurysms"][start:start+64,:,:].detach().numpy() == i for i in range(14)])
-            labels_ane = np.concatenate([labels_ane, label], axis = 1)
+            #labels_ane = np.concatenate([labels_ane, label], axis = 1)
+            preds_ane = (preds_ane * 10000).astype(int)
 
-            preds_seg = np.concatenate([preds_seg, torch.sigmoid(out["seg_vessels"].to(DEVICE).cpu()).detach().numpy()[0]], axis = 1)
+            for c in range(14):
+                negative_preds = preds_ane[c][label[c] < 0.5]
+                positive_preds = preds_ane[c][label[c] > 0.5]
+
+                negative_preds_counter_ane[c] += np.bincount(negative_preds, minlength=10001)
+                positive_preds_counter_ane[c] += np.bincount(positive_preds, minlength=10001)
+
+
+            preds_seg = torch.sigmoid(out["seg_vessels"].to(DEVICE).cpu()).detach().numpy()[0]
             label = np.array([sample["vessels"][start:start+64,:,:].detach().numpy() == i for i in range(14)])
-            labels_seg = np.concatenate([labels_seg, label], axis = 1)
+            #labels_seg = np.concatenate([labels_seg, label], axis = 1)
+            preds_seg = (preds_seg * 10000).astype(int)
+
+            for c in range(14):
+                negative_preds = preds_seg[c][label[c] < 0.5]
+                positive_preds = preds_seg[c][label[c] > 0.5]
+
+                negative_preds_counter_seg[c] += np.bincount(negative_preds, minlength=10001)
+                positive_preds_counter_seg[c] += np.bincount(positive_preds, minlength=10001)
+
+            start += 40
         
         labels.append(sample["aneurysm_vector"].tolist())
         preds.append(pred_out)
@@ -297,7 +345,7 @@ def main():
     # Calculate AUC
     auc_score = evaluate_score(labels, preds)
     auc_score_ane = evaluate_score_seg(labels_ane, preds_ane)
-    auc_score_ves = evaluate_score_seg(labels_ane, preds_ane)
+    auc_score_ves = evaluate_score_seg(labels_seg, preds_seg)
     print(f"AUC Score: {auc_score:.4f}")
 
 
