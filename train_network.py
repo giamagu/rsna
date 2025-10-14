@@ -9,12 +9,45 @@ from torch.utils.data import DataLoader, Subset
 import numpy as np
 
 from dataset import RSNA3DDataset
-from model import MultiTask3DNet
+from model import Unet3D
 from sklearn.metrics import roc_auc_score
 import matplotlib.pyplot as plt
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import cv2
+import SimpleITK as sitk
+from save_dataset_png import convert_to_float32, resample_image, sitk_to_uint8
+
+model = Unet3D().to(DEVICE)
+ckpt_path = "checkpoint_epoch_15.pth"
+model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
+model.eval()
+
+def predict(path):
+    reader = sitk.ImageSeriesReader()
+    dicom_files = reader.GetGDCMSeriesFileNames(path)
+    reader.SetFileNames(dicom_files)
+    image = reader.Execute()
+
+    # ----- Gestisci 4D -----
+    if image.GetDimension() == 4:
+        size = list(image.GetSize())
+        size[3] = 0  # tieni solo un frame
+        index = [0, 0, 0, 0]
+        image = sitk.Extract(image, size, index)
+        image = convert_to_float32(image)
+
+    # ----- Resample immagine -----
+    original_size = image.GetSize()  # (X,Y,Z)
+    image_resampled = resample_image(image, target_size=(224,224))
+    new_size = image_resampled.GetSize()  # (224,224,Z)
+
+    # ----- Salvataggio immagine come PNG -----
+    arr_img = sitk_to_uint8(image_resampled, is_mask=False)
+    arr_img = arr_img.astype(np.float32) / 255
+
+    out = model(arr_img)["class"]
+
 
 def evaluate_score(labels, preds):
     # Converti labels e preds in array NumPy
@@ -86,7 +119,7 @@ def main():
     SPLIT_FILE = os.path.join(DATASET_DIR, "split.json")
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    BATCH_SIZE = 4
+    BATCH_SIZE = 1
     EPOCHS = 40
     LR = 4e-3
 
@@ -145,14 +178,7 @@ def main():
     # ==============================
     # MODEL
     # ==============================
-    model = MultiTask3DNet(
-        in_channels=1,
-        num_vessel_classes=14,
-        num_aneurysm_classes=14,
-        num_classification_classes=14,
-        pretrained=True,
-        freeze_backbone=False
-    ).to(DEVICE)
+    model = Unet3D().to(DEVICE)
 
     '''ckpt_path = "checkpoint_epoch_30.pth"
     model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
@@ -201,6 +227,7 @@ def main():
     for epoch in range(EPOCHS):
 
         if epoch == 20:
+
             train_dataset = RSNA3DDataset(DATASET_DIR, series_ids=train_series, only_vessels = False, transform=train_transforms)
             val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series, only_vessels = False, minimum_slices = 16, maximum_slices=1000000)
 
@@ -220,6 +247,8 @@ def main():
             seg_vessels_gt = batch["vessels"].to(DEVICE, dtype=torch.long)
             seg_aneurysm_gt = batch["aneurysms"].to(DEVICE, dtype=torch.long)
             vec_gt = batch["aneurysm_vector"].to(DEVICE, dtype=torch.float32)
+            vec_gt[:, 0] = 1 - vec_gt[:, 0]
+
 
             optimizer.zero_grad()
             outputs = model(inputs)
@@ -300,7 +329,7 @@ def main():
     positive_preds_counter_seg = [np.zeros(10001) for i in range(14)]
     negative_preds_counter_seg = [np.zeros(10001) for i in range(14)]
 
-    val_dataset   = RSNA3DDataset(DATASET_DIR, series_ids=val_series, only_vessels = False, minimum_slices = 16, maximum_slices=1000000)
+    val_dataset = RSNA3DDataset(DATASET_DIR, series_ids=val_series, only_vessels = False, minimum_slices = 16, maximum_slices=1000000)
 
     for i in range(50):#len(val_dataset)):
         print(i)
